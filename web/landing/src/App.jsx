@@ -1,12 +1,16 @@
+import { useState } from 'react'
 import './index.css'
-import SoccerBallLoader from './SoccerBallLoader'
+import LandingPage from './LandingPage'
+import AnalyzeScreen from './AnalyzeScreen'
 
 function App() {
-  return (
-    <div className="app-root">
-      <SoccerBallLoader size={80} />
-    </div>
-  )
+  const [view, setView] = useState('landing')
+
+  if (view === 'analyze') {
+    return <AnalyzeScreen />
+  }
+
+  return <LandingPage onDone={() => setView('analyze')} />
 }
 
 export default App

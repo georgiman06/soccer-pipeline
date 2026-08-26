@@ -1,0 +1,24 @@
+.landing-page {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  background: radial-gradient(circle at 50% 40%, var(--bg-light), var(--bg-dark) 70%);
+  transition: opacity 0.6s ease;
+}
+
+.landing-page.fading-out {
+  opacity: 0;
+}
+
+.landing-headline {
+  color: #f2fff5;
+  font-weight: 900;
+  font-size: clamp(28px, 5vw, 56px);
+  text-align: center;
+  text-shadow: 0 0 18px var(--text-glow);
+  min-height: 1.2em;
+  padding: 0 16px;
+}
