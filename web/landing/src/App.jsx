@@ -1,9 +1,12 @@
 import './index.css'
+import Typewriter from './Typewriter'
 
 function App() {
   return (
     <div className="app-root">
-      <p>Landing page scaffold OK</p>
+      <h1 className="font-orbitron" style={{ color: '#fff' }}>
+        <Typewriter text="Let's Analyze Some Game!" onDone={() => console.log('done')} />
+      </h1>
     </div>
   )
 }
