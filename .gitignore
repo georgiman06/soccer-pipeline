@@ -1,0 +1,28 @@
+# Large training data & model weights — not versioned
+ball/dataset*/
+ball/raw_data/
+ball/weights/
+ball/spot_check_out/
+pitch/dataset*/
+pitch/raw_data/
+pitch/weights/
+pitch/spot_check_out/
+players/dataset*/
+players/raw_data/
+players/weights/
+players/spot_check_out/
+models/*.pt
+**/__pycache__/
+*.pyc
+
+*.zip
+
+# Node
+node_modules/
+dist/
+
+# Claude Code local state
+.claude/
+
+# Superpowers scratch workspace
+.superpowers/
