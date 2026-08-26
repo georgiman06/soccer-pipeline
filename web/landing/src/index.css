@@ -17,3 +17,13 @@ html, body, #root {
   color: #fff;
   font-family: sans-serif;
 }
+
+:root {
+  --bg-dark: #0a1f14;
+  --bg-light: #123821;
+  --text-glow: rgba(180, 255, 200, 0.55);
+}
+
+.font-orbitron {
+  font-family: 'Orbitron', sans-serif;
+}
