@@ -1,0 +1,9 @@
+.soccer-ball-loader {
+  animation: soccer-ball-spin 1.1s linear infinite;
+  display: inline-block;
+}
+
+@keyframes soccer-ball-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
