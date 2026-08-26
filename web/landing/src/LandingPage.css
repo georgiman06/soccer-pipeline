@@ -10,13 +10,21 @@
   transition: opacity 0.6s ease;
 }
 
-.landing-page::before {
+.landing-page img.bg-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  image-rendering: crisp-edges;
+  z-index: 0;
+}
+
+.landing-page::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: url('/world_cup_bg.gif') center/contain no-repeat;
-  background-size: cover;
-  filter: brightness(0.7);
+  background: linear-gradient(180deg, rgba(10, 31, 20, 0.55) 0%, rgba(18, 56, 33, 0.55) 100%);
   z-index: 0;
 }
 

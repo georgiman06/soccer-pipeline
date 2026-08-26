@@ -3,7 +3,7 @@ import Typewriter from './Typewriter'
 import SoccerBallLoader from './SoccerBallLoader'
 import './LandingPage.css'
 
-const HEADLINE = "Let's Analyze Some Game!"
+const HEADLINE = "Let's Analyze Some Soccer!"
 const POST_TYPE_PAUSE_MS = 900
 const FADE_DURATION_MS = 600
 
@@ -21,6 +21,13 @@ function LandingPage({ onDone }) {
 
   return (
     <div className={`landing-page${fadingOut ? ' fading-out' : ''}`}>
+      <img
+        className="bg-video"
+        src="/world_cup_bg.webp"
+        alt=""
+        aria-hidden="true"
+        loading="eager"
+      />
       <h1 className="landing-headline font-orbitron">
         <Typewriter text={HEADLINE} onDone={handleTypingDone} />
       </h1>
