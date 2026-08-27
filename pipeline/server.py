@@ -42,7 +42,7 @@ WEB = Path(__file__).parent / "web"
 USE_BUCKET = bool(os.environ.get("AWS_S3_BUCKET_NAME"))
 if USE_BUCKET:
     import bucket as _bucket
-    BUCKET_FRAME_PREFIX = "pitch/raw_data/gamestate-2024"
+    BUCKET_FRAME_PREFIX = "gamestate-2024"
 
 app = Flask(__name__, static_folder=None)
 _cors_origins = os.environ.get('CORS_ORIGINS', '*')
