@@ -17,6 +17,7 @@ real-time full-clip playback:
 Run:  python pipeline/server.py   ->   http://127.0.0.1:5000
 """
 import json
+import os
 import sys
 import threading
 from collections import deque
@@ -25,6 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from flask import Flask, jsonify, send_file, send_from_directory
+from flask_cors import CORS
 
 sys.path.insert(0, str(Path(__file__).parent))
 from inference import process_frame, tracker
@@ -37,6 +39,8 @@ GS = ROOT / "pitch" / "raw_data" / "gamestate-2024"
 WEB = Path(__file__).parent / "web"
 
 app = Flask(__name__, static_folder=None)
+_cors_origins = os.environ.get('CORS_ORIGINS', '*')
+CORS(app, resources={r'/api/*': {'origins': _cors_origins}})
 _cache = {}
 _gt_cache = {}
 _last_H = {}      # seq -> (idx, H): last model-validated calibration, for short carries
@@ -684,6 +688,8 @@ def _compute_frame(seq, idx, img_path):
 
 if __name__ == "__main__":
     _load_cache()
+    port = int(os.environ.get("PORT", 5000))
+    host = "0.0.0.0" if os.environ.get("RAILWAY_ENVIRONMENT") else "127.0.0.1"
     print("sequences:", len(list_sequences()))
-    print("serving on http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    print(f"serving on http://{host}:{port}")
+    app.run(host=host, port=port, debug=False)
