@@ -251,6 +251,23 @@
   pointer-events: none;
 }
 
+.pipeline-fetch-error {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 45, 106, 0.18);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 6px 12px;
+  border-radius: 3px;
+  z-index: 4;
+  pointer-events: none;
+}
+
 .pipeline-score-overlay {
   position: absolute;
   top: 50%;

@@ -251,10 +251,22 @@ function PipelineScreen() {
     const { X, Y, ctx } = pitch
     const d = st.pending
     if (!d) return
-    const players = (d.players || []).filter((p) => p.pitch && inField(p.pitch))
+    let players = (d.players || []).filter((p) => p.pitch && inField(p.pitch))
     const t1Color = (d.team_colors && d.team_colors[0]) || st.teamColors[0]
     const t2Color = (d.team_colors && d.team_colors[1]) || st.teamColors[1]
     st.teamColors = [t1Color, t2Color]
+    const usingGT = players.length === 0 && d.gt && d.gt.players_pitch && d.gt.players_pitch.length > 0
+    if (usingGT) {
+      const half = Math.ceil(d.gt.players_pitch.length / 2)
+      players = d.gt.players_pitch.map((p, i) => ({
+        id: i + 1,
+        team: i < half ? 0 : 1,
+        pitch: p,
+        conf: 1,
+        coasting: false,
+        isGT: true,
+      }))
+    }
 
     // ball trail
     if (st.overlayMode === 'ball') {
@@ -329,14 +341,25 @@ function PipelineScreen() {
     for (const p of players) {
       const c = p.team === 0 ? t1Color : t2Color
       const r = p.coasting ? 7 : 9
-      ctx.globalAlpha = p.coasting ? 0.55 : 1
-      drawPlayer(ctx, X(p.pitch[0]), Y(p.pitch[1]), p.id != null ? p.id : '?', c, r)
+      ctx.globalAlpha = p.isGT ? 0.5 : p.coasting ? 0.55 : 1
+      if (p.isGT) {
+        ctx.globalAlpha = 0.55
+        ctx.beginPath()
+        ctx.arc(X(p.pitch[0]), Y(p.pitch[1]), 8, 0, 2 * Math.PI)
+        ctx.strokeStyle = c
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+      } else {
+        drawPlayer(ctx, X(p.pitch[0]), Y(p.pitch[1]), p.id != null ? p.id : '?', c, r)
+      }
     }
     ctx.globalAlpha = 1
 
-    if (d.ball && d.ball.pitch && inField(d.ball.pitch)) {
-      drawBall(ctx, X(d.ball.pitch[0]), Y(d.ball.pitch[1]))
+    let ballPitch = d.ball && d.ball.pitch && inField(d.ball.pitch) ? d.ball.pitch : null
+    if (!ballPitch && d.gt && d.gt.ball_pitch && d.gt.ball_pitch[0] && inField(d.gt.ball_pitch[0])) {
+      ballPitch = d.gt.ball_pitch[0]
     }
+    if (ballPitch) drawBall(ctx, X(ballPitch[0]), Y(ballPitch[1]))
   }
 
   function hexA(hex, a) {
@@ -438,7 +461,13 @@ function PipelineScreen() {
       .then((r) => r.json())
       .then((d) => {
         if (!alive.current) return
-        if (d.error) return
+        if (d.error) {
+          st.fetchError = d.error
+          forceTick((n) => n + 1)
+          return
+        }
+        st.fetchError = null
+        st.lastGoodAt = d.idx
         const last = st.history.length ? st.history[st.history.length - 1] : null
         const lastPlayers = last ? last.players : null
         const projected = (d.players || []).map((p) => ({
@@ -461,7 +490,10 @@ function PipelineScreen() {
         drawOverlay()
         forceTick((n) => n + 1)
       })
-      .catch(() => {})
+      .catch((e) => {
+        st.fetchError = e.message || 'network error'
+        forceTick((n) => n + 1)
+      })
   }
 
   function tick() {
@@ -499,6 +531,37 @@ function PipelineScreen() {
     load()
   }
 
+  function startPrecompute() {
+    if (!st.seq) return
+    fetch(apiUrl(`/api/precompute/${st.seq}`), { method: 'POST' })
+      .then((r) => r.json())
+      .then(() => pollPrecompute())
+  }
+
+  function pollPrecompute() {
+    fetch(apiUrl(`/api/progress/${st.seq}`))
+      .then((r) => r.json())
+      .then((p) => {
+        if (!alive.current) return
+        st.precomputeProgress = p
+        if (p.total > 0 && !p.finished) {
+          st.analytics.recentEvents.unshift({
+            idx: st.idx,
+            kind: 'BG',
+            text: `Precompute ${p.done}/${p.total}`,
+          })
+          st.analytics.recentEvents.length = Math.min(6, st.analytics.recentEvents.length)
+          setTimeout(() => alive.current && pollPrecompute(), 3000)
+        } else if (p.finished) {
+          st.precomputeProgress = null
+          st.analytics.recentEvents.unshift({ idx: st.idx, kind: 'BG', text: 'Precompute finished' })
+          st.analytics.recentEvents.length = Math.min(6, st.analytics.recentEvents.length)
+        }
+        forceTick((n) => n + 1)
+      })
+      .catch(() => setTimeout(() => alive.current && pollPrecompute(), 5000))
+  }
+
   useEffect(() => {
     alive.current = true
     fetch(apiUrl('/api/sequences'))
@@ -520,8 +583,15 @@ function PipelineScreen() {
   const t1Poss = totalPoss > 0 ? Math.round((st.analytics.possT1 / totalPoss) * 100) : 50
   const t2Poss = 100 - t1Poss
 
-  const t1Count = st.pending ? st.pending.players.filter((p) => p.team === 0).length : 0
-  const t2Count = st.pending ? st.pending.players.filter((p) => p.team === 1).length : 0
+  const detectedPlayers = st.pending ? st.pending.players : []
+  const gtCount = st.pending && st.pending.gt ? (st.pending.gt.players_pitch || []).length : 0
+  const usingGTNow = detectedPlayers.length === 0 && gtCount > 0
+  const t1Count = usingGTNow
+    ? Math.ceil(gtCount / 2)
+    : detectedPlayers.filter((p) => p.team === 0).length
+  const t2Count = usingGTNow
+    ? Math.floor(gtCount / 2)
+    : detectedPlayers.filter((p) => p.team === 1).length
   const totalFrames = Math.max(st.analytics.territoryT1 + st.analytics.territoryT2, 1)
   const t1Terr = Math.round((st.analytics.territoryT1 / totalFrames) * 100)
   const t2Terr = Math.round((st.analytics.territoryT2 / totalFrames) * 100)
@@ -596,15 +666,15 @@ function PipelineScreen() {
           <div className="pipeline-video-wrapper">
             <img ref={frameRef} alt="Live match feed" />
             <canvas ref={overlayRef}></canvas>
-            <div className="pipeline-score-overlay">
-              <span className="pipeline-score-team t1" style={{ color: t1Color }}>T1</span>
-              <span className="pipeline-score-cell">{t1Count}</span>
-              <span className="pipeline-score-cell">{t2Count}</span>
-              <span className="pipeline-score-team t2" style={{ color: t2Color }}>T2</span>
-              <span className="pipeline-score-min">{minute}'</span>
-            </div>
+            {st.fetchError && (
+              <div className="pipeline-fetch-error">
+                Backend error: {st.fetchError}
+              </div>
+            )}
             <div className="pipeline-venue">
-              {seqLabel} · TRACKED · CALIB {st.pending?.calib_source?.toUpperCase() || '—'}
+              {seqLabel} · CALIB {st.pending?.calib_source?.toUpperCase() || '—'}
+              {st.pending?.kpts && ` · KPTS ${st.pending.kpts.visible}/${st.pending.kpts.total}`}
+              {st.pending && ` · ${st.pending.players.length} tracked`}
             </div>
             <div className="pipeline-half">Frame {st.idx} / {TOTAL_FRAMES}</div>
             <div className="pipeline-icons">
@@ -635,6 +705,16 @@ function PipelineScreen() {
               background: 'var(--bg-panel)', border: '1px solid var(--border-mid)', color: 'var(--text)',
               padding: '3px 8px', fontSize: 11, fontFamily: 'Consolas, monospace', borderRadius: 3,
             }}></select>
+            <button onClick={startPrecompute} title="Precompute all frames for this clip" style={{
+              background: 'var(--accent)', border: '1px solid var(--accent)', color: '#fff',
+              padding: '3px 10px', fontSize: 10, fontFamily: 'Consolas, monospace',
+              letterSpacing: '0.08em', textTransform: 'uppercase', borderRadius: 3, cursor: 'pointer',
+              fontWeight: 700,
+            }}>
+              {st.precomputeProgress && !st.precomputeProgress.finished && st.precomputeProgress.total > 0
+                ? `BG ${st.precomputeProgress.done}/${st.precomputeProgress.total}`
+                : 'Precompute'}
+            </button>
             <button ref={playBtnRef} onClick={onPlay} style={{
               background: 'transparent', border: '1px solid var(--border-mid)', color: 'var(--text)',
               padding: '3px 12px', fontSize: 11, fontFamily: 'Consolas, monospace',
@@ -719,7 +799,7 @@ function PipelineScreen() {
           </div>
           <div className="metric-grid">
             <MetricCard label="BALL SPEED" value={ballSpeed} unit="km/h" />
-            <MetricCard label="PLAYERS" value={t1Count + t2Count} unit="trk" />
+            <MetricCard label={usingGTNow ? "PLAYERS · GT" : "PLAYERS"} value={t1Count + t2Count} unit="on" />
             <MetricCard label="SPRINTS" value={totalSprints} unit="frm" />
             <MetricCard label="INTENSITY" value={intensity} unit="%" />
           </div>
@@ -737,7 +817,7 @@ function PipelineScreen() {
           <div className="score-row">
             <div className="score-team t1">
               <span className="score-dot t1" style={{ background: t1Color, boxShadow: `0 0 8px ${t1Color}` }} />
-              <span>Team 1 · {t1Count} on</span>
+              <span>{usingGTNow ? 'Team 1 · GT' : `Team 1 · ${t1Count} on`}</span>
             </div>
             <div className="score-numbers">
               <span className="score-num t1" style={{ color: t1Color }}>{t1Count}</span>
@@ -745,7 +825,7 @@ function PipelineScreen() {
               <span className="score-num t2" style={{ color: t2Color }}>{t2Count}</span>
             </div>
             <div className="score-team t2">
-              <span>Team 2 · {t2Count} on</span>
+              <span>{usingGTNow ? 'Team 2 · GT' : `Team 2 · ${t2Count} on`}</span>
               <span className="score-dot t2" style={{ background: t2Color, boxShadow: `0 0 8px ${t2Color}` }} />
             </div>
           </div>
