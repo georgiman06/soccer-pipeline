@@ -72,43 +72,75 @@ CODE_V = 3              # bump when rendering-relevant logic changes (freeze=2, 
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
+# Record import time so the /api/health endpoint can show how fast boot was.
+# With 36 cache files in S3 a naive load at startup blew past Railway's
+# healthcheck window and gunicorn was killed before serving a request.
+import time as _time
+_BOOT_TIME = _time.time()
+
 
 def _load_cache():
-    # In bucket mode, sync cache files from the bucket to local
-    if USE_BUCKET:
-        local_cache = CACHE_DIR
-        local_cache.mkdir(exist_ok=True)
-        for key in _bucket.list_keys(prefix="cache/"):
-            if key.endswith(".json"):
-                local_path = local_cache / Path(key).name
-                if not local_path.exists():
-                    try:
-                        _bucket.get_path(key)
-                    except FileNotFoundError:
-                        pass
+    """Load only already-cached local files. Bucket downloads happen lazily so
+    gunicorn workers boot in seconds, not minutes. A 60MB startup download
+    reliably exceeds the Railway edge timeout and the worker dies mid-fetch
+    — the frontend then sees an HTML 502 instead of JSON.
+    """
     for f in CACHE_DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
         if not isinstance(data, dict) or data.get("v") != CACHE_V:
-            continue  # stale schema from before the homography fixes
-        seq = f.stem
-        _cache_code_v[seq] = data.get("code_v", 0)
-        frames = data.get("frames", {})
-        for frame_str, res in frames.items():
-            _cache[(seq, int(frame_str))] = res
-        if frames:
-            # only report finished when every frame is cached — a partial cache
-            # must not let the player run at 25 fps into uncached stalls
-            total_imgs = _count_frames(seq)
-            PRECOMPUTE[seq] = {
-                "done": max(int(k) for k in frames),
-                "total": total_imgs,
-                "finished": len(frames) >= total_imgs,
-            }
+            continue
+        _ingest_cache_blob(f.stem, data)
     if _cache:
-        print(f"loaded {len(_cache)} cached frames from disk")
+        print(f"loaded {len(_cache)} cached frames from local disk")
+
+
+def _ingest_cache_blob(seq, data):
+    """Merge one cache blob (from local disk OR downloaded bucket object) into
+    the in-memory cache. Safe to call repeatedly for the same seq."""
+    if not isinstance(data, dict) or data.get("v") != CACHE_V:
+        return
+    _cache_code_v[seq] = data.get("code_v", 0)
+    frames = data.get("frames", {})
+    for frame_str, res in frames.items():
+        _cache[(seq, int(frame_str))] = res
+    if frames:
+        total_imgs = _count_frames(seq)
+        PRECOMPUTE[seq] = {
+            "done": max(int(k) for k in frames),
+            "total": total_imgs,
+            "finished": len(frames) >= total_imgs,
+        }
+
+
+def _ensure_seq_cache(seq):
+    """Download and ingest a single clip's cache from the bucket on first use.
+    Idempotent — the second call is a dict lookup. Runs synchronously; expected
+    cost: one ~1.7MB S3 GET per seq on cold access, ~50ms on warm."""
+    if not USE_BUCKET:
+        return
+    if any(s == seq for (s, _) in _cache.keys()) or seq in _cache_code_v:
+        return  # already loaded
+    local_path = CACHE_DIR / f"{seq}.json"
+    if local_path.exists() and local_path.stat().st_size > 0:
+        try:
+            data = json.loads(local_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = None
+        if data:
+            _ingest_cache_blob(seq, data)
+            return
+    try:
+        bucket_path = _bucket.get_path(f"cache/{seq}.json")
+    except FileNotFoundError:
+        return
+    try:
+        data = json.loads(bucket_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    _ingest_cache_blob(seq, data)
 
 
 def _persist(seq):
@@ -241,6 +273,16 @@ def index():
     return send_from_directory(WEB, "index.html")
 
 
+@app.get("/api/health")
+def api_health():
+    return jsonify({
+        "ok": True,
+        "use_bucket": USE_BUCKET,
+        "cached_frames": len(_cache),
+        "boot_time_s": round(_BOOT_TIME, 2),
+    })
+
+
 @app.get("/api/sequences")
 def api_sequences():
     return jsonify(list_sequences())
@@ -258,6 +300,7 @@ def api_frame(seq, idx):
 
 @app.get("/api/process/<seq>/<int:idx>")
 def api_process(seq, idx):
+    _ensure_seq_cache(seq)
     key = (seq, idx)
     if key in _cache:
         return jsonify(_cache[key])
@@ -281,6 +324,7 @@ _PREWORKER_RUNNING = False
 
 
 def _precompute_seq(seq):
+    _ensure_seq_cache(seq)
     total = _count_frames(seq)
     PRECOMPUTE[seq] = {"done": 0, "total": total, "finished": False}
     # drop any out-of-order cached frames and reset the tracker so the
@@ -379,6 +423,7 @@ def api_queue_status():
 
 @app.get("/api/progress/<seq>")
 def api_progress(seq):
+    _ensure_seq_cache(seq)
     return jsonify(PRECOMPUTE.get(seq, {"done": 0, "total": 0, "finished": False}))
 
 

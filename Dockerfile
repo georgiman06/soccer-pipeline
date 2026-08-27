@@ -19,4 +19,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD cd pipeline && gunicorn server:app -b 0.0.0.0:${PORT:-8080} -w 1 --threads 4 --timeout 120
+CMD cd pipeline && gunicorn server:app -b 0.0.0.0:${PORT:-8080} -w 1 --threads 4 --timeout 120 --graceful-timeout 30 --keep-alive 5
