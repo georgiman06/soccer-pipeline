@@ -28,10 +28,16 @@ function LandingPage({ onDone }) {
         aria-hidden="true"
         loading="eager"
       />
-      <h1 className="landing-headline font-orbitron">
+      <div className="landing-brand">
+        <span className="landing-brand-logo">S</span>
+        <span>SPORTVIZ PRO / Analytics</span>
+      </div>
+      <h1 className="landing-headline">
         <Typewriter text={HEADLINE} onDone={handleTypingDone} />
       </h1>
-      {!typingDone && <SoccerBallLoader size={48} />}
+      <div className="landing-sub">UEFA CHAMPIONS LEAGUE · MATCH INTELLIGENCE</div>
+      {!typingDone && <SoccerBallLoader size={42} />}
+      <div className="landing-pill">● LIVE</div>
     </div>
   )
 }
