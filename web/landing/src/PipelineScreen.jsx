@@ -161,32 +161,64 @@ function PipelineScreen() {
 
   function drawPitch() {
     const c = pitchRef.current
+    if (!c) return { X: () => 0, Y: () => 0 }
     const ctx = c.getContext('2d')
     const W = 105
     const H = 68
-    const m = 6
-    const s = Math.min((c.width - 2 * m) / W, (c.height - 2 * m) / H)
+    const m = 8
+    const cw = c.width
+    const ch = c.height
+    const s = Math.min((cw - 2 * m) / W, (ch - 2 * m) / H)
     const X = (x) => m + (x + 2.5) * s
     const Y = (y) => m + (y + 2.5) * s
-    ctx.clearRect(0, 0, c.width, c.height)
-    ctx.fillStyle = '#1e7a34'
+    ctx.clearRect(0, 0, cw, ch)
+
+    ctx.fillStyle = '#1a5e2a'
     ctx.fillRect(X(0), Y(0), W * s, H * s)
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)'
-    ctx.lineWidth = 1.5
+
+    const grad = ctx.createLinearGradient(X(0), Y(0), X(0), Y(H))
+    grad.addColorStop(0, '#1e6b2a')
+    grad.addColorStop(1, '#164e1a')
+    ctx.fillStyle = grad
+    ctx.fillRect(X(0), Y(0), W * s, H * s)
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)'
+    ctx.lineWidth = 2
+    ctx.lineCap = 'round'
     ctx.strokeRect(X(0), Y(0), W * s, H * s)
+
     ctx.beginPath()
     ctx.moveTo(X(52.5), Y(0))
     ctx.lineTo(X(52.5), Y(68))
     ctx.stroke()
+
     ctx.beginPath()
     ctx.arc(X(52.5), Y(34), 9.15 * s, 0, 2 * Math.PI)
     ctx.stroke()
+
+    ctx.beginPath()
+    ctx.arc(X(52.5), Y(34), 0.8 * s, 0, 2 * Math.PI)
+    ctx.fill()
+
     for (const side of [[0, 1], [105, -1]]) {
       const [gx, dir] = side
       ctx.strokeRect(X(Math.min(gx, gx + 16.5 * dir)), Y(13.84), 16.5 * s, 40.32 * s)
       ctx.strokeRect(X(Math.min(gx, gx + 5.5 * dir)), Y(24.84), 5.5 * s, 18.32 * s)
       ctx.strokeRect(X(Math.min(gx, gx + 2 * dir)), Y(34 - 3.66), 2 * s, 7.32 * s)
+
+      const penSpot = dir === 1 ? [11, 34] : [94, 34]
+      ctx.beginPath()
+      ctx.arc(X(penSpot[0]), Y(penSpot[1]), 0.8 * s, 0, 2 * Math.PI)
+      ctx.fill()
+
+      const arcX = dir === 1 ? 11 : 94
+      const arcStart = dir === 1 ? 0.55 : 2.55
+      const arcEnd = dir === 1 ? 5.75 : 3.75
+      ctx.beginPath()
+      ctx.arc(X(arcX), Y(34), 8 * s, arcStart * Math.PI, arcEnd * Math.PI)
+      ctx.stroke()
     }
+
     return { X, Y }
   }
 
@@ -418,45 +450,61 @@ function PipelineScreen() {
 
   return (
     <div className="pipeline-screen">
-      <header className="pipeline-header">
-        <h1>Soccer Pipeline</h1>
-        <select ref={seqSelRef} onChange={onSeqChange}></select>
-        <button onClick={onPrev}>&#9664;</button>
-        <button ref={playBtnRef} onClick={onPlay}>Play</button>
-        <button onClick={onNext}>&#9654;</button>
-        <button ref={precompBtnRef} onClick={startPrecompute}>Precompute clip</button>
-        <button ref={precompAllBtnRef} onClick={precomputeAll}>Precompute ALL</button>
-        <label><input ref={markToggleRef} type="checkbox" defaultChecked onChange={() => drawOverlay(overlayToggleRef.current?.checked)} /> Markers</label>
-        <label><input ref={gtToggleRef} type="checkbox" defaultChecked onChange={render} /> Ground truth</label>
-        <label><input ref={overlayToggleRef} type="checkbox" defaultChecked onChange={() => drawOverlay(overlayToggleRef.current?.checked)} /> Pitch lines</label>
-        <label><input ref={idToggleRef} type="checkbox" onChange={render} /> IDs</label>
-        <select ref={speedSelRef} title="playback speed" defaultValue="40">
-          <option value="80">0.5x</option>
-          <option value="40">1x</option>
-          <option value="20">2x</option>
-        </select>
-      </header>
-      <main className="pipeline-main">
-        <div className="pipeline-video-pane">
-          <img ref={frameRef} alt="frame" />
-          <canvas ref={overlayRef}></canvas>
-        </div>
-        <div className="pipeline-map-pane">
-          <canvas ref={pitchRef} width="640" height="440"></canvas>
-        </div>
+      <main className="pipeline-grid">
+        <section className="pipeline-video-panel">
+          <div className="pipeline-video-wrapper">
+            <img ref={frameRef} alt="frame" />
+            <canvas ref={overlayRef}></canvas>
+          </div>
+          <input ref={sliderRef} type="range" min="1" max={TOTAL_FRAMES} defaultValue="1" onInput={onSliderInput} />
+          <div ref={statusRef} className="pipeline-status"><span className="pipeline-chip">loading...</span></div>
+        </section>
+
+        <section className="pipeline-pitch-panel">
+          <div className="pipeline-pitch-toolbar">
+            <label><input ref={markToggleRef} type="checkbox" defaultChecked onChange={() => drawOverlay(overlayToggleRef.current?.checked)} /> Markers</label>
+            <label><input ref={gtToggleRef} type="checkbox" defaultChecked onChange={render} /> Ground truth</label>
+            <label><input ref={overlayToggleRef} type="checkbox" defaultChecked onChange={() => drawOverlay(overlayToggleRef.current?.checked)} /> Pitch lines</label>
+            <label><input ref={idToggleRef} type="checkbox" onChange={render} /> IDs</label>
+          </div>
+          <canvas ref={pitchRef} width="640" height="440" className="pipeline-pitch-canvas"></canvas>
+          <div className="pipeline-legend">
+            <span><span ref={swTeam0Ref} className="pipeline-sw" style={{ background: '#fff' }}></span>team 1 (auto)</span>
+            <span><span ref={swTeam1Ref} className="pipeline-sw" style={{ background: '#fff' }}></span>team 2 (auto)</span>
+            <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px solid #fff', width: 6, height: 6 }}></span>player (GT)</span>
+            <span><span className="pipeline-sw" style={{ background: '#ffb020' }}></span>ball</span>
+            <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px solid #ffb020', width: 6, height: 6 }}></span>ball (GT)</span>
+            <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px dashed #ff4dd2', width: 6, height: 6, borderRadius: 0 }}></span>pitch lines (calib)</span>
+          </div>
+        </section>
+
+        <section className="pipeline-stats-panel">
+          <h2>Match Stats</h2>
+          <div className="pipeline-stats-placeholder">
+            <p>Match statistics — API integration pending</p>
+          </div>
+        </section>
+
+        <section className="pipeline-settings-panel">
+          <div className="pipeline-settings-group">
+            <h3>Clip</h3>
+            <select ref={seqSelRef} onChange={onSeqChange}></select>
+            <button ref={precompBtnRef} onClick={startPrecompute}>Precompute clip</button>
+            <button ref={precompAllBtnRef} onClick={precomputeAll}>Precompute ALL</button>
+          </div>
+          <div className="pipeline-settings-group">
+            <h3>Playback</h3>
+            <button onClick={onPrev}>&#9664;</button>
+            <button ref={playBtnRef} onClick={onPlay}>Play</button>
+            <button onClick={onNext}>&#9654;</button>
+            <select ref={speedSelRef} title="playback speed" defaultValue="40">
+              <option value="80">0.5x</option>
+              <option value="40">1x</option>
+              <option value="20">2x</option>
+            </select>
+          </div>
+        </section>
       </main>
-      <footer className="pipeline-footer">
-        <input ref={sliderRef} type="range" min="1" max={TOTAL_FRAMES} defaultValue="1" onInput={onSliderInput} />
-        <div ref={statusRef} className="pipeline-status"><span className="pipeline-chip">loading...</span></div>
-        <div className="pipeline-legend">
-          <span><span ref={swTeam0Ref} className="pipeline-sw" style={{ background: '#fff' }}></span>team 1 (auto)</span>
-          <span><span ref={swTeam1Ref} className="pipeline-sw" style={{ background: '#fff' }}></span>team 2 (auto)</span>
-          <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px solid #fff', width: 6, height: 6 }}></span>player (GT)</span>
-          <span><span className="pipeline-sw" style={{ background: '#ffb020' }}></span>ball</span>
-          <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px solid #ffb020', width: 6, height: 6 }}></span>ball (GT)</span>
-          <span><span className="pipeline-sw" style={{ background: 'transparent', border: '2px dashed #ff4dd2', width: 6, height: 6, borderRadius: 0 }}></span>pitch lines (calib)</span>
-        </div>
-      </footer>
     </div>
   )
 }
