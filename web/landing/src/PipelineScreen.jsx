@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import './PipelineScreen.css'
+import { apiUrl } from './config.js'
 
 const TOTAL_FRAMES = 750
 
@@ -63,11 +64,11 @@ function PipelineScreen() {
     }
     if (precompBtnRef.current) precompBtnRef.current.disabled = true
     setStatus(chip('precompute started...', 'info'))
-    fetch(`/api/precompute/${st.seq}`, { method: 'POST' }).then(() => pollProgress())
+    fetch(apiUrl(`/api/precompute/${st.seq}`), { method: 'POST' }).then(() => pollProgress())
   }
 
   function pollProgress() {
-    fetch(`/api/progress/${st.seq}`)
+    fetch(apiUrl(`/api/progress/${st.seq}`))
       .then((r) => r.json())
       .then((p) => {
         if (!alive.current) return
@@ -94,7 +95,7 @@ function PipelineScreen() {
   }
 
   function pollQueue() {
-    fetch('/api/queue_status')
+    fetch(apiUrl('/api/queue_status'))
       .then((r) => r.json())
       .then((q) => {
         if (!alive.current) return
@@ -119,7 +120,7 @@ function PipelineScreen() {
   function precomputeAll() {
     if (!window.confirm('Precompute ALL clips? ~30 min each — runs in the background for hours (resumable; finished clips are skipped). Continue?')) return
     if (precompAllBtnRef.current) precompAllBtnRef.current.disabled = true
-    fetch('/api/precompute_all', { method: 'POST' })
+    fetch(apiUrl('/api/precompute_all'), { method: 'POST' })
       .then((r) => r.json())
       .then((d) => {
         setStatus(
@@ -341,8 +342,8 @@ function PipelineScreen() {
     st.busy = true
     const reqIdx = st.idx
     setStatus(chip(`processing frame ${reqIdx} ...`, 'info'))
-    if (frameRef.current) frameRef.current.src = `/api/frame/${st.seq}/${reqIdx}`
-    fetch(`/api/process/${st.seq}/${reqIdx}`)
+    if (frameRef.current) frameRef.current.src = apiUrl(`/api/frame/${st.seq}/${reqIdx}`)
+      fetch(apiUrl(`/api/process/${st.seq}/${reqIdx}`))
       .then((r) => r.json())
       .then((d) => {
         if (!alive.current) return
@@ -422,7 +423,7 @@ function PipelineScreen() {
 
   useEffect(() => {
     alive.current = true
-    fetch('/api/sequences')
+    fetch(apiUrl('/api/sequences'))
       .then((r) => r.json())
       .then((s) => {
         if (!alive.current) return
@@ -430,7 +431,7 @@ function PipelineScreen() {
         if (seqSelRef.current) seqSelRef.current.innerHTML = s.map((x) => `<option>${x}</option>`).join('')
         st.seq = s[0]
         load()
-        fetch('/api/queue_status')
+    fetch(apiUrl('/api/queue_status'))
           .then((r) => r.json())
           .then((q) => {
             if (!alive.current) return
