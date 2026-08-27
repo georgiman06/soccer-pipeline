@@ -282,6 +282,7 @@
 
 .pipeline-score-team.t1 { color: var(--team1); background: rgba(220, 38, 38, 0.12); }
 .pipeline-score-team.t2 { color: var(--team2); background: rgba(255, 210, 63, 0.10); }
+.pipeline-score-team { transition: color 0.2s; }
 
 .pipeline-score-cell {
   background: var(--bg-panel);
@@ -736,6 +737,8 @@
 
 .score-num.t1 { color: var(--team1); }
 .score-num.t2 { color: var(--team2); }
+.score-num { transition: color 0.2s; }
+.poss-pct { transition: color 0.2s; }
 
 .score-dash { color: var(--text-dim); font-weight: 400; }
 
