@@ -1,15 +1,27 @@
 """Unified inference pipeline: ball + player + pitch-keypoint models in one call."""
+import os
 from pathlib import Path
 
 from ultralytics import YOLO
 
 from ball_tracker import BallTracker
 
-MODELS_DIR = Path(__file__).parent.parent / "models"
-
-ball_model = YOLO(MODELS_DIR / "ball_best.pt")
-pitch_model = YOLO(MODELS_DIR / "pitch_best_ft.pt")
-players_model = YOLO(MODELS_DIR / "players_best.pt")
+# Models can be loaded from the bucket (Railway S3) or the local filesystem
+if os.environ.get("AWS_S3_BUCKET_NAME"):
+    import bucket as _bucket
+    _model_dir = _bucket._local_root() / "models"
+    _model_dir.mkdir(parents=True, exist_ok=True)
+    _ball_path = _bucket.get_path("models/ball_best.pt")
+    _pitch_path = _bucket.get_path("models/pitch_best_ft.pt")
+    _players_path = _bucket.get_path("models/players_best.pt")
+    ball_model = YOLO(_ball_path)
+    pitch_model = YOLO(_pitch_path)
+    players_model = YOLO(_players_path)
+else:
+    MODELS_DIR = Path(__file__).parent.parent / "models"
+    ball_model = YOLO(MODELS_DIR / "ball_best.pt")
+    pitch_model = YOLO(MODELS_DIR / "pitch_best_ft.pt")
+    players_model = YOLO(MODELS_DIR / "players_best.pt")
 
 CONF = 0.3
 tracker = BallTracker(conf_threshold=CONF)

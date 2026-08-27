@@ -25,7 +25,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, send_file, send_from_directory
+from flask import Flask, Response, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -37,6 +37,12 @@ from player_tracker import PlayerTracker
 ROOT = Path(__file__).parent.parent
 GS = ROOT / "pitch" / "raw_data" / "gamestate-2024"
 WEB = Path(__file__).parent / "web"
+
+# When the AWS_S3_BUCKET_NAME env var is set, fetch data from the bucket instead
+USE_BUCKET = bool(os.environ.get("AWS_S3_BUCKET_NAME"))
+if USE_BUCKET:
+    import bucket as _bucket
+    BUCKET_FRAME_PREFIX = "pitch/raw_data/gamestate-2024"
 
 app = Flask(__name__, static_folder=None)
 _cors_origins = os.environ.get('CORS_ORIGINS', '*')
@@ -68,6 +74,18 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 
 def _load_cache():
+    # In bucket mode, sync cache files from the bucket to local
+    if USE_BUCKET:
+        local_cache = CACHE_DIR
+        local_cache.mkdir(exist_ok=True)
+        for key in _bucket.list_keys(prefix="cache/"):
+            if key.endswith(".json"):
+                local_path = local_cache / Path(key).name
+                if not local_path.exists():
+                    try:
+                        _bucket.get_path(key)
+                    except FileNotFoundError:
+                        pass
     for f in CACHE_DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text())
@@ -83,7 +101,7 @@ def _load_cache():
         if frames:
             # only report finished when every frame is cached — a partial cache
             # must not let the player run at 25 fps into uncached stalls
-            total_imgs = len(list((GS / seq / "img1").glob("*.jpg")))
+            total_imgs = _count_frames(seq)
             PRECOMPUTE[seq] = {
                 "done": max(int(k) for k in frames),
                 "total": total_imgs,
@@ -100,6 +118,15 @@ def _persist(seq):
         "frames": {str(idx): res for (s, idx), res in _cache.items() if s == seq},
     }
     (CACHE_DIR / f"{seq}.json").write_text(json.dumps(data))
+    if USE_BUCKET:
+        try:
+            _bucket._client().put_object(
+                Bucket=_bucket._bucket(),
+                Key=f"cache/{seq}.json",
+                Body=json.dumps(data).encode(),
+            )
+        except Exception:
+            pass
 
 # template lines (meters) for the video overlay check
 TEMPLATE_LINES = [
@@ -108,11 +135,50 @@ TEMPLATE_LINES = [
     [(0, 13.84), (16.5, 13.84)], [(16.5, 13.84), (16.5, 54.16)], [(16.5, 54.16), (0, 54.16)],
     [(105, 13.84), (88.5, 13.84)], [(88.5, 13.84), (88.5, 54.16)], [(88.5, 54.16), (105, 54.16)],
     [(0, 24.84), (5.5, 24.84)], [(5.5, 24.84), (5.5, 43.16)], [(5.5, 43.16), (0, 43.16)],
-    [(105, 24.84), (99.5, 24.84)], [(99.5, 24.84), (99.5, 43.16)], [(99.5, 43.16), (105, 43.16)],
+    [(105, 24.84), (99.5, 24.84)], [(99.5, 24.84), (99.5, 43.16)], [(105, 43.16), (99.5, 43.16)],
 ]
 
 
+def _frame_path(seq, idx):
+    """Resolve a frame to a local Path (downloads from bucket if needed)."""
+    if USE_BUCKET:
+        key = f"{BUCKET_FRAME_PREFIX}/{seq}/img1/{idx:06d}.jpg"
+        return _bucket.get_path(key)
+    return GS / seq / "img1" / f"{idx:06d}.jpg"
+
+
+def _frame_bytes(seq, idx):
+    """Resolve a frame to bytes (for sending without writing to disk)."""
+    if USE_BUCKET:
+        key = f"{BUCKET_FRAME_PREFIX}/{seq}/img1/{idx:06d}.jpg"
+        try:
+            return _bucket.get_bytes(key)
+        except Exception:
+            return None
+    p = GS / seq / "img1" / f"{idx:06d}.jpg"
+    if p.exists():
+        return p.read_bytes()
+    return None
+
+
+def _count_frames(seq):
+    """Count the number of image frames in a sequence."""
+    if USE_BUCKET:
+        prefix = f"{BUCKET_FRAME_PREFIX}/{seq}/img1/"
+        return sum(1 for k in _bucket.list_keys(prefix=prefix) if k.endswith(".jpg"))
+    return len(list((GS / seq / "img1").glob("*.jpg")))
+
+
 def list_sequences():
+    if USE_BUCKET:
+        # Find all SNGS-* folders in the bucket
+        keys = _bucket.list_keys(prefix=f"{BUCKET_FRAME_PREFIX}/")
+        seqs = set()
+        for k in keys:
+            parts = k.split("/")
+            if len(parts) >= 4 and parts[-2] == "img1":
+                seqs.add(parts[-3])
+        return sorted(seqs)
     return sorted(p.name for p in GS.iterdir() if (p / "img1").is_dir())
 
 
@@ -120,7 +186,11 @@ def gt_for(seq):
     """Parse Labels-GameState.json once: {frame: {'players': [(feet_img, pitch)], 'ball': [(center_img, pitch)]}}."""
     if seq in _gt_cache:
         return _gt_cache[seq]
-    data = json.load(open(GS / seq / "Labels-GameState.json"))
+    if USE_BUCKET:
+        gt_bytes = _bucket.get_bytes(f"{BUCKET_FRAME_PREFIX}/{seq}/Labels-GameState.json")
+        data = json.loads(gt_bytes)
+    else:
+        data = json.load(open(GS / seq / "Labels-GameState.json"))
     per_frame = {}
     for ann in data["annotations"]:
         img_id = ann["image_id"]
@@ -178,6 +248,11 @@ def api_sequences():
 
 @app.get("/api/frame/<seq>/<int:idx>")
 def api_frame(seq, idx):
+    if USE_BUCKET:
+        data = _frame_bytes(seq, idx)
+        if data is None:
+            return jsonify({"error": "frame not found"}), 404
+        return Response(data, mimetype="image/jpeg")
     return send_file(GS / seq / "img1" / f"{idx:06d}.jpg")
 
 
@@ -186,7 +261,7 @@ def api_process(seq, idx):
     key = (seq, idx)
     if key in _cache:
         return jsonify(_cache[key])
-    img_path = GS / seq / "img1" / f"{idx:06d}.jpg"
+    img_path = _frame_path(seq, idx)
     if not img_path.exists():
         return jsonify({"error": "frame not found"}), 404
 
@@ -206,7 +281,7 @@ _PREWORKER_RUNNING = False
 
 
 def _precompute_seq(seq):
-    total = len(list((GS / seq / "img1").glob("*.jpg")))
+    total = _count_frames(seq)
     PRECOMPUTE[seq] = {"done": 0, "total": total, "finished": False}
     # drop any out-of-order cached frames and reset the tracker so the
     # sequential pass produces coherent ball tracking
@@ -224,8 +299,14 @@ def _precompute_seq(seq):
         _last_cand.pop(seq, None)
         _ball_smooth.pop(seq, None)
     for idx in range(1, total + 1):
-        img_path = GS / seq / "img1" / f"{idx:06d}.jpg"
-        if img_path.exists():
+        img_path = _frame_path(seq, idx)
+        if not img_path.exists():
+            try:
+                _bucket.get_path(f"{BUCKET_FRAME_PREFIX}/{seq}/img1/{idx:06d}.jpg")
+                img_path = _frame_path(seq, idx)
+            except FileNotFoundError:
+                break
+        if not img_path.exists():
             _cache[(seq, idx)] = _compute_frame(seq, idx, img_path)
         PRECOMPUTE[seq]["done"] = idx
         if idx % 10 == 0:
