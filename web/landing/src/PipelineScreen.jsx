@@ -254,6 +254,7 @@ function PipelineScreen() {
   const [backendUp, setBackendUp] = useState(true)
   const [bufferPct, setBufferPct] = useState(0)
   const [bufferedFrames, setBufferedFrames] = useState(0)
+  const [precompute, setPrecompute] = useState({ state: 'idle', done: 0, total: 0 })
 
   const frameRef = useRef(null)
   const overlayRef = useRef(null)
@@ -537,10 +538,25 @@ function PipelineScreen() {
     const t1Color = (d.team_colors && d.team_colors[0]) || st.teamColors[0]
     const t2Color = (d.team_colors && d.team_colors[1]) || st.teamColors[1]
     st.teamColors = [t1Color, t2Color]
-    const usingGT = players.length === 0 && d.gt && d.gt.players_pitch && d.gt.players_pitch.length > 0
-    if (usingGT) {
-      const half = Math.ceil(d.gt.players_pitch.length / 2)
-      players = d.gt.players_pitch.map((p, i) => ({
+
+    // Detect a degenerate projection: if all detected players are clustered
+    // in a small area of the pitch but their image x or y spanned a wide
+    // range, the homography is bad even if the model claimed calib=model.
+    let degenerate = false
+    if (players.length >= 4) {
+      const xs = players.map((p) => p.pitch[0])
+      const ys = players.map((p) => p.pitch[1])
+      const xSpread = Math.max(...xs) - Math.min(...xs)
+      const ySpread = Math.max(...ys) - Math.min(...ys)
+      // 6+ players in a 15m x 20m box = degenerate
+      if (players.length >= 6 && xSpread < 15 && ySpread < 20) degenerate = true
+    }
+
+    const usingGT = players.length === 0 || degenerate
+    const gtPlayers = (d.gt && d.gt.players_pitch) || []
+    if (usingGT && gtPlayers.length > 0) {
+      const half = Math.ceil(gtPlayers.length / 2)
+      players = gtPlayers.map((p, i) => ({
         id: i + 1, team: i < half ? 0 : 1, pitch: p, conf: 1, coasting: false, isGT: true,
       }))
     }
@@ -669,6 +685,44 @@ function PipelineScreen() {
     setOverlayMode(id)
   }
 
+  function startPrecompute() {
+    if (!st.seq || precompute.state !== 'idle') return
+    setPrecompute({ state: 'queued', done: 0, total: 0 })
+    fetch(apiUrl(`/api/precompute/${st.seq}`), { method: 'POST' })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.already_done) {
+          setPrecompute({ state: 'done', done: 0, total: 0 })
+          setTimeout(() => setPrecompute({ state: 'idle', done: 0, total: 0 }), 2000)
+          return
+        }
+        pollPrecompute()
+      })
+      .catch(() => setPrecompute({ state: 'error', done: 0, total: 0 }))
+  }
+
+  function pollPrecompute() {
+    if (!st.seq) return
+    fetch(apiUrl(`/api/progress/${st.seq}`))
+      .then((r) => r.json())
+      .then((p) => {
+        if (!alive.current) return
+        if (p.total > 0 && !p.finished) {
+          setPrecompute({ state: 'running', done: p.done, total: p.total })
+          setTimeout(() => alive.current && pollPrecompute(), 3000)
+        } else if (p.finished) {
+          setPrecompute({ state: 'done', done: p.total, total: p.total })
+          setClips((prev) => prev.map((c) => c.seq === st.seq ? { ...c, status: 'ready', cached_frames: p.total } : c))
+          resetBuffer()
+          loadFrame(st.idx)
+          setTimeout(() => setPrecompute({ state: 'idle', done: 0, total: 0 }), 2000)
+        } else {
+          setPrecompute({ state: 'idle', done: 0, total: 0 })
+        }
+      })
+      .catch(() => setTimeout(() => alive.current && pollPrecompute(), 5000))
+  }
+
   // ---- derived UI values ----
   const totalPoss = st.analytics.possT1 + st.analytics.possT2
   const t1Poss = totalPoss > 0 ? Math.round((st.analytics.possT1 / totalPoss) * 100) : 50
@@ -677,6 +731,21 @@ function PipelineScreen() {
   const t2Count = st.pending ? st.pending.players.filter((p) => p.team === 1).length : 0
   const t1Color = (st.pending && st.pending.team_colors && st.pending.team_colors[0]) || st.teamColors[0]
   const t2Color = (st.pending && st.pending.team_colors && st.pending.team_colors[1]) || st.teamColors[1]
+
+  // Degenerate projection check: when 6+ players are clustered into a tiny
+  // pitch area but their pixel positions spanned a wide range, the
+  // homography fit is bad even if the model claimed calib=model. The pitch
+  // then shows GT fallback instead, and the header pill flips red.
+  const ps = st.pending && st.pending.players
+  let isDegenerate = false
+  if (ps && ps.length >= 6) {
+    const xs = ps.map((p) => p.pitch[0])
+    const ys = ps.map((p) => p.pitch[1])
+    if (Math.max(...xs) - Math.min(...xs) < 15 && Math.max(...ys) - Math.min(...ys) < 20) {
+      isDegenerate = true
+    }
+  }
+  const usingGT = isDegenerate || (st.pending && st.pending.players && st.pending.players.length === 0)
 
   const totalTerr = Math.max(st.analytics.territoryT1 + st.analytics.territoryT2, 1)
   const t1Terr = Math.round((st.analytics.territoryT1 / totalTerr) * 100)
@@ -821,11 +890,13 @@ function PipelineScreen() {
           <section className="pipeline-grid-cell">
             <div className="panel-label">
               <div className="panel-label-main">2D Pitch <span className="panel-label-sub">· Tactical View</span></div>
-              {diag.players > 0
-                ? <span className="pill pill-active">{diag.players} TRACKED</span>
-                : (st.pending && st.pending.gt && st.pending.gt.players_pitch && st.pending.gt.players_pitch.length > 0)
-                  ? <span className="pill pill-warn">MODEL OFF · GT ON</span>
-                  : <span className="pill pill-info">AWAITING DATA</span>}
+              {isDegenerate
+                ? <span className="pill pill-bad">DEGENERATE FIT · RE-PRECOMPUTE</span>
+                : diag.players > 0
+                  ? <span className="pill pill-active">{diag.players} TRACKED</span>
+                  : usingGT
+                    ? <span className="pill pill-warn">GT FALLBACK</span>
+                    : <span className="pill pill-info">AWAITING DATA</span>}
             </div>
             <div className="pitch-frame">
               <div className="pitch-shell">
@@ -850,6 +921,20 @@ function PipelineScreen() {
                   <label><input type="checkbox" defaultChecked onChange={() => renderPitch()} /> IDs</label>
                   <label><input type="checkbox" onChange={() => renderPitch()} /> Ball</label>
                 </div>
+                <button
+                  className="vbtn"
+                  onClick={startPrecompute}
+                  disabled={precompute.state === 'queued' || precompute.state === 'running'}
+                  title="Re-run precompute with current model weights to fix degenerate homography fits"
+                >
+                  {precompute.state === 'running'
+                    ? `BG ${precompute.done}/${precompute.total}`
+                    : precompute.state === 'queued'
+                      ? 'Queued'
+                      : precompute.state === 'done'
+                        ? 'Done'
+                        : 'Re-precompute'}
+                </button>
               </div>
             </div>
           </section>
