@@ -605,6 +605,27 @@ def _compute_frame(seq, idx, img_path):
                 ).reshape(-1, 2)
                 if not np.all(np.isfinite(proj)) or np.abs(proj).max() > 1e4:
                     return False
+                # A "good" homography maps the spread of visible keypoints to
+                # a spread of similar magnitude in pitch space. A degenerate
+                # fit on a half-pitch view (model sees only 5-8 keypoints all
+                # in one corner) collapses pixel x=500..1800 to pitch x=0..5,
+                # making all the players pile up on the goal line. Reject any
+                # fit that compresses the visible region by more than 10x in
+                # either axis — the mapping isn't recoverable from this view.
+                if len(proj) >= 2:
+                    img_x_range = float(max(p[0] for p in vis_pts) - min(p[0] for p in vis_pts))
+                    img_y_range = float(max(p[1] for p in vis_pts) - min(p[1] for p in vis_pts))
+                    pitch_x_range = float(np.ptp(proj[:, 0]))
+                    pitch_y_range = float(np.ptp(proj[:, 1]))
+                    if img_x_range > 100 and pitch_x_range > 0 and pitch_x_range / img_x_range < 0.005:
+                        return False
+                    if img_y_range > 100 and pitch_y_range > 0 and pitch_y_range / img_y_range < 0.005:
+                        return False
+                    # Also reject if the pitch range from visible keypoints is
+                    # smaller than 5m on a view that should span the pitch —
+                    # half-pitch view should still cover 30+ meters
+                    if img_x_range > 800 and pitch_x_range < 8:
+                        return False
             pp = to_pitch(Hc, feet_img) if feet_img else []
             inside = sum(1 for p in pp if p is not None and -3 <= p[0] <= 108 and -3 <= p[1] <= 71)
             return len(pp) >= 4 and inside / len(pp) >= 0.55
