@@ -468,6 +468,40 @@
   background: var(--border-mid);
   border-radius: 2px;
   outline: none;
+  position: relative;
+  z-index: 2;
+}
+
+.video-slider-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 18px;
+}
+
+.video-slider-buffered {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 5px;
+  background: linear-gradient(90deg, rgba(0, 255, 136, 0.35), rgba(0, 255, 136, 0.55));
+  border-radius: 2px;
+  z-index: 1;
+  pointer-events: none;
+  transition: width 0.3s ease;
+}
+
+.video-buffer-pct {
+  font-family: 'Consolas', monospace;
+  font-size: 9px;
+  color: var(--active);
+  letter-spacing: 0.08em;
+  min-width: 44px;
+  text-align: right;
+  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .video-slider::-webkit-slider-thumb {

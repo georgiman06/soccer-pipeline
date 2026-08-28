@@ -234,6 +234,13 @@ function PipelineScreen() {
     },
     fetchError: null,
     lastSeqAt: null,
+    // Per-frame buffer: pre-fetch a window of frames around the playhead so
+    // playback at 5-15 fps is steady instead of stuttery. The browser makes
+    // ~6 concurrent requests; with 220ms backend latency a buffer of 8 gives
+    // ~1.6s of smooth playback. Each entry: { idx, data, srcLoaded }.
+    frameBuffer: new Map(),
+    bufferLow: 0,
+    bufferHigh: 0,
   }).current
 
   const [clips, setClips] = useState([])
@@ -245,6 +252,8 @@ function PipelineScreen() {
   const [playing, setPlaying] = useState(false)
   const [diag, setDiag] = useState({ kpts: '—', calib: '—', players: 0, hq: 0, ball: '—' })
   const [backendUp, setBackendUp] = useState(true)
+  const [bufferPct, setBufferPct] = useState(0)
+  const [bufferedFrames, setBufferedFrames] = useState(0)
 
   const frameRef = useRef(null)
   const overlayRef = useRef(null)
@@ -252,6 +261,7 @@ function PipelineScreen() {
   const playBtnRef = useRef(null)
   const speedSelRef = useRef(null)
   const alive = useRef(true)
+  const clipSeqRef = useRef(null)
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000)
@@ -292,6 +302,7 @@ function PipelineScreen() {
     if (clipLoadState === 'warming') return
     setActiveSeq(clip.seq)
     st.seq = clip.seq
+    clipSeqRef.current = clip.seq
     st.idx = 1; setIdx(1)
     st.history.length = 0
     Object.assign(st.analytics, {
@@ -305,11 +316,13 @@ function PipelineScreen() {
       events: [],
     })
     st.fetchError = null
+    resetBuffer()
 
     if (clip.status === 'ready') {
       setClipLoadState('ready')
       loadFrame(1)
       autoStartPlayback()
+      kickoffFullPrefetch()
       return
     }
     setClipLoadState('warming')
@@ -321,9 +334,44 @@ function PipelineScreen() {
       setClips((prev) => prev.map((c) => c.seq === clip.seq ? { ...c, status: 'ready', cached_frames: clip.total_frames } : c))
       loadFrame(1)
       autoStartPlayback()
+      kickoffFullPrefetch()
     } catch (e) {
       if (!alive.current) return
       setClipLoadState('error')
+    }
+  }
+
+  function kickoffFullPrefetch() {
+    // Once a clip is warm, fire 4 concurrent streams that each grab every
+    // 4th frame in batches. With 220ms per request, 4 streams fill the
+    // 750-frame buffer in ~40s. Playback stays smooth because prefetchAhead
+    // is already pulling the next 10 frames around the playhead.
+    if (!st.seq) return
+    const streams = 4
+    const total = TOTAL_FRAMES
+    for (let s = 0; s < streams; s++) {
+      const start = s + 1
+      for (let idx = start; idx <= total; idx += streams) {
+        const captured = idx
+        if (st.frameBuffer.has(captured)) continue
+        const slot = {}
+        st.frameBuffer.set(captured, slot)
+        // small delay so we don't open 750 sockets at once
+        const delay = (s * 60) + Math.floor((idx - start) / streams) * 8
+        setTimeout(() => {
+          if (!alive.current || st.seq !== clipSeqRef.current) return
+          fetch(apiUrl(`/api/process/${st.seq}/${captured}`))
+            .then((r) => r.json())
+            .then((d) => {
+              if (!alive.current || d.error) return
+              const slot = st.frameBuffer.get(captured) || {}
+              slot.data = d
+              st.frameBuffer.set(captured, slot)
+              refreshBufferUi()
+            })
+            .catch(() => {})
+        }, delay)
+      }
     }
   }
 
@@ -341,39 +389,101 @@ function PipelineScreen() {
 
   function loadFrame(targetIdx) {
     if (!st.seq) return
-    // Cache-bust every frame request. The browser otherwise reuses the same
-    // <img> bytes when the same URL is set repeatedly, so the video appears
-    // frozen even though the pitch is rendering new per-frame data.
-    if (frameRef.current) frameRef.current.src = apiUrl(`/api/frame/${st.seq}/${targetIdx}?t=${Date.now()}_${targetIdx}`)
-    fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
-      .then((r) => r.json())
-      .then((d) => {
-        if (!alive.current || d.seq !== st.seq) return
-        if (d.error) {
-          st.fetchError = d.error
-          return
-        }
-        st.fetchError = null
-        st.pending = d
-        const last = st.history[st.history.length - 1]
-        const lastPlayers = last ? last.players : null
-        st.history.push({
-          idx: d.idx,
-          ballPitch: d.ball ? d.ball.pitch : null,
-          players: lastPlayers || d.players,
+    // Take from buffer if we already have this frame, otherwise fetch it now.
+    const cached = st.frameBuffer.get(targetIdx)
+    if (cached) {
+      if (cached.data) applyFrameData(cached.data)
+      if (cached.src) frameRef.current.src = cached.src
+    } else {
+      // Cache-bust every frame request so the browser doesn't reuse the
+      // previous JPEG bytes.
+      const src = apiUrl(`/api/frame/${st.seq}/${targetIdx}?t=${Date.now()}_${targetIdx}`)
+      frameRef.current.src = src
+      fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
+        .then((r) => r.json())
+        .then((d) => {
+          if (!alive.current) return
+          if (d.error) return
+          const slot = st.frameBuffer.get(targetIdx) || {}
+          slot.data = d
+          st.frameBuffer.set(targetIdx, slot)
+          if (targetIdx === st.idx) applyFrameData(d)
         })
-        if (st.history.length > 120) st.history.shift()
-        updateAnalytics(d)
-        setDiag({
-          kpts: d.kpts ? `${d.kpts.visible}/${d.kpts.total}` : '—',
-          calib: d.calib_source || '—',
-          players: d.players.length,
-          hq: Math.round((d.h_quality || 0) * 100),
-          ball: d.ball ? `${Math.round((d.ball.conf || 0) * 100)}%` : '—',
+    }
+    prefetchAhead(targetIdx)
+  }
+
+  function applyFrameData(d) {
+    if (!alive.current) return
+    st.pending = d
+    const last = st.history[st.history.length - 1]
+    const lastPlayers = last ? last.players : null
+    st.history.push({
+      idx: d.idx,
+      ballPitch: d.ball ? d.ball.pitch : null,
+      players: lastPlayers || d.players,
+    })
+    if (st.history.length > 120) st.history.shift()
+    updateAnalytics(d)
+    setDiag({
+      kpts: d.kpts ? `${d.kpts.visible}/${d.kpts.total}` : '—',
+      calib: d.calib_source || '—',
+      players: d.players.length,
+      hq: Math.round((d.h_quality || 0) * 100),
+      ball: d.ball ? `${Math.round((d.ball.conf || 0) * 100)}%` : '—',
+    })
+    renderPitch()
+    refreshBufferUi()
+  }
+
+  function refreshBufferUi() {
+    const ready = [...st.frameBuffer.values()].filter((s) => s && s.data).length
+    setBufferedFrames(ready)
+    setBufferPct(ready / Math.max(TOTAL_FRAMES, 1))
+  }
+
+  function prefetchAhead(currentIdx) {
+    if (!st.seq) return
+    // Prefetch the next 10 frames into the buffer; trim anything > 20 behind.
+    const ahead = 10
+    const behind = 20
+    for (let off = 1; off <= ahead; off++) {
+      const idx = currentIdx + off
+      if (idx > TOTAL_FRAMES) break
+      if (st.frameBuffer.has(idx)) continue
+      const slot = {}
+      st.frameBuffer.set(idx, slot)
+      // fire-and-forget; result is stored into the buffer when it lands
+      fetch(apiUrl(`/api/process/${st.seq}/${idx}`))
+        .then((r) => r.json())
+        .then((d) => {
+          if (!alive.current || d.error) return
+          const s = st.frameBuffer.get(idx) || {}
+          s.data = d
+          st.frameBuffer.set(idx, s)
+          refreshBufferUi()
         })
-        renderPitch()
-      })
-      .catch((e) => { st.fetchError = e.message })
+        .catch(() => {})
+    }
+    // Also kick off the JPEG src for the next frame so the <img> has it ready
+    const nextSrc = currentIdx + 1
+    if (nextSrc <= TOTAL_FRAMES) {
+      const nextSlot = st.frameBuffer.get(nextSrc) || {}
+      if (!nextSlot.src) {
+        const src = apiUrl(`/api/frame/${st.seq}/${nextSrc}?t=${Date.now()}_${nextSrc}`)
+        nextSlot.src = src
+        st.frameBuffer.set(nextSrc, nextSlot)
+      }
+    }
+    // Trim old entries so the buffer doesn't grow unbounded across the clip
+    const minKeep = Math.max(1, currentIdx - behind)
+    for (const k of st.frameBuffer.keys()) {
+      if (k < minKeep) st.frameBuffer.delete(k)
+    }
+  }
+
+  function resetBuffer() {
+    st.frameBuffer.clear()
   }
 
   function updateAnalytics(d) {
@@ -676,15 +786,23 @@ function PipelineScreen() {
               </div>
               <div className="video-controls">
                 <span className="video-time"><strong>{fmtTime(idx)}</strong> / {fmtTime(TOTAL_FRAMES)}</span>
-                <input
-                  className="video-slider"
-                  type="range"
-                  min="1"
-                  max={TOTAL_FRAMES}
-                  value={idx}
-                  disabled={!videoReady}
-                  onInput={onSlider}
-                />
+                <div className="video-slider-wrap">
+                  <div className="video-slider-buffered" style={{ width: `${bufferPct * 100}%` }} />
+                  <input
+                    className="video-slider"
+                    type="range"
+                    min="1"
+                    max={TOTAL_FRAMES}
+                    value={idx}
+                    disabled={!videoReady}
+                    onInput={onSlider}
+                  />
+                </div>
+                <span className="video-buffer-pct" title="Frames prefetched and ready for instant playback">
+                  {bufferedFrames > 0
+                    ? (bufferedFrames >= TOTAL_FRAMES ? 'CACHED' : `BUF ${bufferedFrames}`)
+                    : '—'}
+                </span>
                 <button className="vbtn vbtn-icon" onClick={onPrev} disabled={!videoReady || idx <= 1}>◀</button>
                 <button ref={playBtnRef} className="vbtn primary" onClick={onPlay} disabled={!videoReady}>
                   {playing ? 'Pause' : 'Play'}
