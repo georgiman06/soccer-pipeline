@@ -341,7 +341,10 @@ function PipelineScreen() {
 
   function loadFrame(targetIdx) {
     if (!st.seq) return
-    if (frameRef.current) frameRef.current.src = apiUrl(`/api/frame/${st.seq}/${targetIdx}`)
+    // Cache-bust every frame request. The browser otherwise reuses the same
+    // <img> bytes when the same URL is set repeatedly, so the video appears
+    // frozen even though the pitch is rendering new per-frame data.
+    if (frameRef.current) frameRef.current.src = apiUrl(`/api/frame/${st.seq}/${targetIdx}?t=${Date.now()}_${targetIdx}`)
     fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
       .then((r) => r.json())
       .then((d) => {
@@ -528,13 +531,16 @@ function PipelineScreen() {
 
   function tick() {
     if (!st.playing) return
-    if (st.idx < TOTAL_FRAMES) {
-      st.idx++; setIdx(st.idx)
-      loadFrame(st.idx)
-    } else {
+    if (st.idx >= TOTAL_FRAMES) {
       st.playing = false; setPlaying(false)
       return
     }
+    st.idx++; setIdx(st.idx)
+    loadFrame(st.idx)
+    // The backend's /api/process takes ~150-300ms even on a warm cache. 40ms
+    // is the wall-clock target so playback visually feels like 25fps even
+    // though we only get every other frame back in real time. The pitch
+    // smooths the gap with the rolling history buffer.
     setTimeout(() => alive.current && tick(), +(speedSelRef.current?.value || 40))
   }
 
@@ -684,10 +690,10 @@ function PipelineScreen() {
                   {playing ? 'Pause' : 'Play'}
                 </button>
                 <button className="vbtn vbtn-icon" onClick={onNext} disabled={!videoReady || idx >= TOTAL_FRAMES}>▶</button>
-                <select ref={speedSelRef} className="vbtn" defaultValue="40" style={{ padding: '4px 6px' }}>
-                  <option value="80">0.5x</option>
-                  <option value="40">1x</option>
-                  <option value="20">2x</option>
+                <select ref={speedSelRef} className="vbtn" defaultValue="200" style={{ padding: '4px 6px' }}>
+                  <option value="400">0.5x</option>
+                  <option value="200">1x</option>
+                  <option value="100">2x</option>
                 </select>
               </div>
             </div>
