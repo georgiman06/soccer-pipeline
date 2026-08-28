@@ -309,6 +309,7 @@ function PipelineScreen() {
     if (clip.status === 'ready') {
       setClipLoadState('ready')
       loadFrame(1)
+      autoStartPlayback()
       return
     }
     setClipLoadState('warming')
@@ -317,13 +318,25 @@ function PipelineScreen() {
       if (!r.ok) throw new Error('warm failed')
       if (!alive.current) return
       setClipLoadState('ready')
-      // patch the clip status locally so the card lights up immediately
       setClips((prev) => prev.map((c) => c.seq === clip.seq ? { ...c, status: 'ready', cached_frames: clip.total_frames } : c))
       loadFrame(1)
+      autoStartPlayback()
     } catch (e) {
       if (!alive.current) return
       setClipLoadState('error')
     }
+  }
+
+  function autoStartPlayback() {
+    // Give the first frame a moment to render, then start ticking so the
+    // user immediately sees the clip animate — no need to find the Play
+    // button to verify the rendering is correct.
+    setTimeout(() => {
+      if (!alive.current || st.playing) return
+      st.playing = true
+      setPlaying(true)
+      tick()
+    }, 600)
   }
 
   function loadFrame(targetIdx) {
@@ -481,7 +494,36 @@ function PipelineScreen() {
     if (!ballPitch && d.gt && d.gt.ball_pitch && d.gt.ball_pitch[0] && inField(d.gt.ball_pitch[0])) {
       ballPitch = d.gt.ball_pitch[0]
     }
-    if (ballPitch) drawBall(ctx, X(ballPitch[0]), Y(ballPitch[1]))
+    if (ballPitch) {
+      drawBall(ctx, X(ballPitch[0]), Y(ballPitch[1]))
+    } else {
+      // Ball not detected this frame: render a hollow question mark so the
+      // user knows the model is searching, not that the ball is invisible.
+      const cx = X(52.5), cy = Y(34)
+      ctx.beginPath()
+      ctx.arc(cx, cy, 8, 0, 2 * Math.PI)
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([3, 3])
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = 'rgba(255,255,255,0.45)'
+      ctx.font = '600 11px Consolas, monospace'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText('?', cx, cy)
+    }
+    // frame index badge in the corner of the pitch so the user can correlate
+    // pitch state with the video time slider
+    if (d.idx) {
+      ctx.fillStyle = 'rgba(6, 10, 20, 0.7)'
+      ctx.fillRect(8, 8, 64, 18)
+      ctx.fillStyle = '#00ff88'
+      ctx.font = '600 10px Consolas, monospace'
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(`F${String(d.idx).padStart(3, '0')}`, 14, 17)
+    }
   }
 
   function tick() {
@@ -786,10 +828,10 @@ function PipelineScreen() {
               </div>
               <div className="metric-strip">
                 <MetricCard label="BALL" value={(() => {
-                  if (st.history.length < 2) return '0.0'
+                  if (!st.pending || !st.pending.ball || st.history.length < 2) return '—'
                   const a = st.history[st.history.length - 2]
                   const b = st.history[st.history.length - 1]
-                  if (!a.ballPitch || !b.ballPitch) return '0.0'
+                  if (!a.ballPitch || !b.ballPitch) return '—'
                   return (distM(a.ballPitch, b.ballPitch) * FPS * 3.6).toFixed(1)
                 })()} unit="km/h" />
                 <MetricCard label="SPRINTS" value={totalSprints} unit="frm" />
