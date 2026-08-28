@@ -72,9 +72,10 @@ CODE_V = 3              # bump when rendering-relevant logic changes (freeze=2, 
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-# Record import time so the /api/health endpoint can show how fast boot was.
-# With 36 cache files in S3 a naive load at startup blew past Railway's
-# healthcheck window and gunicorn was killed before serving a request.
+# Record import time so the /api/health endpoint can show how long ago the
+# worker booted. With 36 cache files in S3 a naive load at startup blew past
+# Railway's healthcheck window and gunicorn was killed before serving a
+# request — the fix was lazy loading, so this is mostly informational now.
 import time as _time
 _BOOT_TIME = _time.time()
 
@@ -279,13 +280,57 @@ def api_health():
         "ok": True,
         "use_bucket": USE_BUCKET,
         "cached_frames": len(_cache),
-        "boot_time_s": round(_BOOT_TIME, 2),
+        "uptime_s": round(_time.time() - _BOOT_TIME, 1),
     })
 
 
 @app.get("/api/sequences")
 def api_sequences():
     return jsonify(list_sequences())
+
+
+@app.get("/api/clips")
+def api_clips():
+    """Per-clip readiness for the Clip Library UI.
+
+    Status is one of: ready (>=95% of frames cached), partial, cold (not in memory).
+    A clip becomes 'partial' or 'ready' only after _ensure_seq_cache has
+    downloaded + ingested it; the frontend should call /api/warm_clip for any
+    clip it wants to view so the first /api/process call doesn't pay the
+    ~1.7MB S3 download + parse cost on the user's critical path.
+    """
+    seqs = list_sequences()
+    out = []
+    for seq in seqs:
+        cached = sum(1 for (s, _) in _cache.keys() if s == seq)
+        total = PRECOMPUTE.get(seq, {}).get("total", 0) or 0
+        finished = PRECOMPUTE.get(seq, {}).get("finished", False)
+        if finished and total > 0 and cached >= total:
+            status = "ready"
+        elif cached > 0:
+            status = "partial"
+        else:
+            status = "cold"
+        out.append({
+            "seq": seq,
+            "cached_frames": cached,
+            "total_frames": total,
+            "precompute_finished": finished,
+            "status": status,
+        })
+    return jsonify(out)
+
+
+@app.post("/api/warm_clip/<seq>")
+def api_warm_clip(seq):
+    """Eagerly download + ingest the cache for a single clip.
+
+    Blocks for ~1-2s on a cold connection (one S3 GET), then returns. The
+    next /api/process call is instant. Idempotent.
+    """
+    _ensure_seq_cache(seq)
+    cached = sum(1 for (s, _) in _cache.keys() if s == seq)
+    return jsonify({"seq": seq, "cached_frames": cached, "ok": True})
 
 
 @app.get("/api/frame/<seq>/<int:idx>")
@@ -296,6 +341,19 @@ def api_frame(seq, idx):
             return jsonify({"error": "frame not found"}), 404
         return Response(data, mimetype="image/jpeg")
     return send_file(GS / seq / "img1" / f"{idx:06d}.jpg")
+
+
+@app.get("/api/thumbnail/<seq>")
+def api_thumbnail(seq):
+    """Small middle-frame JPEG for the Clip Library card preview. ~30KB, fast."""
+    if USE_BUCKET:
+        mid = max(1, _count_frames(seq) // 2)
+        data = _frame_bytes(seq, mid)
+        if data is None:
+            return jsonify({"error": "frame not found"}), 404
+        return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+    mid = max(1, len(list((GS / seq / "img1").glob("*.jpg"))) // 2)
+    return send_file(GS / seq / "img1" / f"{mid:06d}.jpg")
 
 
 @app.get("/api/process/<seq>/<int:idx>")
