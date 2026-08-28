@@ -275,7 +275,11 @@ function PipelineScreen() {
       setClips(data)
       setBackendUp(true)
       if (!activeSeq && data.length > 0) {
-        const preferred = data.find((c) => c.status === 'ready') || data.find((c) => c.seq === 'SNGS-027') || data[0]
+        // Prefer SNGS-027 (the reference match) and any clip already cached
+        const preferred =
+          data.find((c) => c.seq === 'SNGS-027') ||
+          data.find((c) => c.status === 'ready') ||
+          data[0]
         if (preferred) loadClip(preferred)
       }
     } catch (e) {
