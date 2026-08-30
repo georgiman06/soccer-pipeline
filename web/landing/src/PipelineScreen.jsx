@@ -326,7 +326,6 @@ function PipelineScreen() {
       setClipLoadState('ready')
       loadFrame(1)
       autoStartPlayback()
-      kickoffFullPrefetch()
       return
     }
     setClipLoadState('warming')
@@ -338,7 +337,6 @@ function PipelineScreen() {
       setClips((prev) => prev.map((c) => c.seq === clip.seq ? { ...c, status: 'ready', cached_frames: clip.total_frames } : c))
       loadFrame(1)
       autoStartPlayback()
-      kickoffFullPrefetch()
     } catch (e) {
       if (!alive.current) return
       setClipLoadState('error')
@@ -393,20 +391,20 @@ function PipelineScreen() {
 
   function loadFrame(targetIdx) {
     if (!st.seq) return
+    st.requestSeq = (st.requestSeq || 0) + 1
+    const myReq = st.requestSeq
     // Take from buffer if we already have this frame, otherwise fetch it now.
     const cached = st.frameBuffer.get(targetIdx)
     if (cached) {
       if (cached.data) applyFrameData(cached.data)
       if (cached.src) frameRef.current.src = cached.src
     } else {
-      // Cache-bust every frame request so the browser doesn't reuse the
-      // previous JPEG bytes.
       const src = apiUrl(`/api/frame/${st.seq}/${targetIdx}?t=${Date.now()}_${targetIdx}`)
       frameRef.current.src = src
       fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
         .then((r) => r.json())
         .then((d) => {
-          if (!alive.current) return
+          if (!alive.current || myReq !== st.requestSeq) return
           if (d.error) return
           const slot = st.frameBuffer.get(targetIdx) || {}
           slot.data = d
@@ -449,16 +447,18 @@ function PipelineScreen() {
 
   function prefetchAhead(currentIdx) {
     if (!st.seq) return
-    // Prefetch the next 10 frames into the buffer; trim anything > 20 behind.
-    const ahead = 10
-    const behind = 20
+    // Pull only the next 3 frames into the buffer. Aggressive prefetching
+    // (10+) saturates the 4-thread gunicorn worker and causes the user's
+    // actual playback requests to queue behind 750 background fetches,
+    // pushing per-frame latency from 90ms to 4000ms.
+    const ahead = 3
+    const behind = 8
     for (let off = 1; off <= ahead; off++) {
       const idx = currentIdx + off
       if (idx > TOTAL_FRAMES) break
       if (st.frameBuffer.has(idx)) continue
       const slot = {}
       st.frameBuffer.set(idx, slot)
-      // fire-and-forget; result is stored into the buffer when it lands
       fetch(apiUrl(`/api/process/${st.seq}/${idx}`))
         .then((r) => r.json())
         .then((d) => {
@@ -470,7 +470,6 @@ function PipelineScreen() {
         })
         .catch(() => {})
     }
-    // Also kick off the JPEG src for the next frame so the <img> has it ready
     const nextSrc = currentIdx + 1
     if (nextSrc <= TOTAL_FRAMES) {
       const nextSlot = st.frameBuffer.get(nextSrc) || {}
@@ -480,7 +479,6 @@ function PipelineScreen() {
         st.frameBuffer.set(nextSrc, nextSlot)
       }
     }
-    // Trim old entries so the buffer doesn't grow unbounded across the clip
     const minKeep = Math.max(1, currentIdx - behind)
     for (const k of st.frameBuffer.keys()) {
       if (k < minKeep) st.frameBuffer.delete(k)
