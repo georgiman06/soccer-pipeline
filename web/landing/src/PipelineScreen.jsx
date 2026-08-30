@@ -241,6 +241,14 @@ function PipelineScreen() {
     frameBuffer: new Map(),
     bufferLow: 0,
     bufferHigh: 0,
+    // Request rate control: the browser caps at 6 concurrent connections
+    // per origin, and emitting 30 req/sec during auto-play saturated the
+    // queue. Track in-flight fetches and drop new ones past 4 to leave
+    // headroom for prefetch.
+    inFlight: 0,
+    requestSeq: 0,
+    // Rolling latency tracker for adaptive tick interval
+    latencyEma: 100,
   }).current
 
   const [clips, setClips] = useState([])
@@ -397,22 +405,37 @@ function PipelineScreen() {
     const cached = st.frameBuffer.get(targetIdx)
     if (cached) {
       if (cached.data) applyFrameData(cached.data)
-      if (cached.src) frameRef.current.src = cached.src
-    } else {
+      if (cached.src && !st.playing) frameRef.current.src = cached.src
+      return
+    }
+    // Don't fetch the JPEG if we're auto-playing and a recent frame is already
+    // shown — the <img> animation is smoother when the browser just keeps the
+    // previous frame visible while process data updates. The user only needs
+    // a fresh JPEG on manual scrub or play/pause boundaries.
+    if (!st.playing) {
       const src = apiUrl(`/api/frame/${st.seq}/${targetIdx}?t=${Date.now()}_${targetIdx}`)
       frameRef.current.src = src
-      fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
-        .then((r) => r.json())
-        .then((d) => {
-          if (!alive.current || myReq !== st.requestSeq) return
-          if (d.error) return
-          const slot = st.frameBuffer.get(targetIdx) || {}
-          slot.data = d
-          st.frameBuffer.set(targetIdx, slot)
-          if (targetIdx === st.idx) applyFrameData(d)
-        })
     }
-    prefetchAhead(targetIdx)
+    // Backpressure: if we already have 4+ requests in flight, skip this frame.
+    // The tick loop will catch up on the next pass instead of queueing.
+    if (st.inFlight >= 4) return
+    st.inFlight++
+    const t0 = performance.now()
+    fetch(apiUrl(`/api/process/${st.seq}/${targetIdx}`))
+      .then((r) => r.json())
+      .then((d) => {
+        st.inFlight = Math.max(0, st.inFlight - 1)
+        const dt = performance.now() - t0
+        st.latencyEma = st.latencyEma ? 0.7 * st.latencyEma + 0.3 * dt : dt
+        if (!alive.current || myReq !== st.requestSeq) return
+        if (d.error) return
+        const slot = st.frameBuffer.get(targetIdx) || {}
+        slot.data = d
+        st.frameBuffer.set(targetIdx, slot)
+        if (targetIdx === st.idx) applyFrameData(d)
+      })
+      .catch(() => { st.inFlight = Math.max(0, st.inFlight - 1) })
+    if (!st.playing) prefetchAhead(targetIdx)
   }
 
   function applyFrameData(d) {
@@ -761,11 +784,13 @@ function PipelineScreen() {
     }
     st.idx++; setIdx(st.idx)
     loadFrame(st.idx)
-    // The backend's /api/process takes ~150-300ms even on a warm cache. 40ms
-    // is the wall-clock target so playback visually feels like 25fps even
-    // though we only get every other frame back in real time. The pitch
-    // smooths the gap with the rolling history buffer.
-    setTimeout(() => alive.current && tick(), +(speedSelRef.current?.value || 40))
+    // Adaptive interval: scale the wall-clock target to measured server
+    // latency. On a fast LAN we render at 5 fps (200ms); on a slow mobile
+    // network the EMA will push the interval up to 500ms so the queue
+    // stays empty and per-frame latency matches the actual server time.
+    const base = +(speedSelRef.current?.value || 200)
+    const adaptive = Math.max(base, Math.round(st.latencyEma * 1.4))
+    setTimeout(() => alive.current && tick(), adaptive)
   }
 
   function onPlay() {
