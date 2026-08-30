@@ -284,6 +284,81 @@ def api_health():
     })
 
 
+@app.get("/api/clip_video/<seq>")
+def api_clip_video(seq):
+    """Stream an H.264 MP4 of the clip. Built on first request by ffmpeg
+    from the per-frame JPEGs in the bucket, then cached to the bucket so
+    subsequent requests are a single GET. The frontend <video> element
+    handles range requests, seeking, and 25-30fps playback natively — no
+    per-frame HTTP traffic during playback.
+    """
+    import subprocess, tempfile, os
+
+    if not USE_BUCKET:
+        return jsonify({"error": "clip_video requires bucket mode"}), 400
+
+    cache_key = f"videos/{seq}.mp4"
+    # If the MP4 is already in the bucket, stream it via a redirect-equivalent
+    # download path. Easiest: copy from bucket to /tmp and send_file, or just
+    # stream the bytes through.
+    try:
+        local = _bucket.get_path(cache_key)
+        if local.exists() and local.stat().st_size > 0:
+            return send_file(local, mimetype="video/mp4", conditional=True)
+    except FileNotFoundError:
+        pass
+
+    # Build the MP4 on demand. Pull all frames into a temp dir, then ffmpeg.
+    with tempfile.TemporaryDirectory() as td:
+        for idx in range(1, _count_frames(seq) + 1):
+            try:
+                data = _frame_bytes(seq, idx)
+            except Exception:
+                break
+            if not data:
+                break
+            with open(os.path.join(td, f"{idx:06d}.jpg"), "wb") as f:
+                f.write(data)
+        # ffmpeg: H.264 + faststart so range requests work in the browser
+        out = os.path.join(td, f"{seq}.mp4")
+        cmd = [
+            "ffmpeg", "-y", "-framerate", "25", "-i",
+            os.path.join(td, "%06d.jpg"),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+            "-crf", "23", "-movflags", "+faststart",
+            out,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "ffmpeg failed", "stderr": e.stderr.decode(errors="ignore")[:500]}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "ffmpeg timeout"}), 500
+        # upload to bucket
+        try:
+            _bucket.put_bytes(cache_key, open(out, "rb").read(), content_type="video/mp4")
+        except Exception as e:
+            return jsonify({"error": f"upload failed: {e}"}), 500
+        return send_file(out, mimetype="video/mp4", conditional=True)
+
+
+@app.get("/api/clip_data/<seq>")
+def api_clip_data(seq):
+    """Download the entire precomputed cache for a clip in a single response.
+    Lets the frontend render tracking data with zero per-frame network
+    traffic — the <video> drives the timeline, and pitch state comes from
+    the in-memory blob keyed by frame index.
+    """
+    _ensure_seq_cache(seq)
+    frames = {str(idx): _cache[(seq, idx)] for (s, idx) in _cache.keys() if s == seq}
+    return jsonify({
+        "seq": seq,
+        "v": CACHE_V,
+        "code_v": _cache_code_v.get(seq, 0),
+        "frames": frames,
+    })
+
+
 @app.get("/api/sequences")
 def api_sequences():
     return jsonify(list_sequences())

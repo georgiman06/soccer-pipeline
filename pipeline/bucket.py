@@ -60,6 +60,14 @@ def get_bytes(key: str) -> bytes:
     return obj["Body"].read()
 
 
+def put_bytes(key: str, data: bytes, content_type: str = "application/octet-stream"):
+    """Upload bytes to a key. Used for caching derived artifacts (MP4
+    videos of clips, precomputed analysis) so the next request is a single
+    GET instead of a full rebuild."""
+    client = _client()
+    client.put_object(Bucket=_bucket(), Key=key, Body=data, ContentType=content_type)
+
+
 def list_keys(prefix: str = "") -> list:
     """List all keys in the bucket with the given prefix."""
     client = _client()
