@@ -255,6 +255,9 @@ function PipelineScreen() {
   const [bufferPct, setBufferPct] = useState(0)
   const [bufferedFrames, setBufferedFrames] = useState(0)
   const [precompute, setPrecompute] = useState({ state: 'idle', done: 0, total: 0 })
+  const [showGT, setShowGT] = useState(true)
+  const [showOverlay, setShowOverlay] = useState(true)
+  const [showIds, setShowIds] = useState(true)
 
   const frameRef = useRef(null)
   const overlayRef = useRef(null)
@@ -434,6 +437,7 @@ function PipelineScreen() {
       ball: d.ball ? `${Math.round((d.ball.conf || 0) * 100)}%` : '—',
     })
     renderPitch()
+    drawVideoOverlay()
     refreshBufferUi()
   }
 
@@ -527,6 +531,67 @@ function PipelineScreen() {
     if (a.events.length > 8) a.events.length = 8
   }
 
+  function drawVideoOverlay() {
+    const img = frameRef.current
+    const cv = overlayRef.current
+    if (!img || !cv) return
+    if (!img.naturalWidth) { requestAnimationFrame(drawVideoOverlay); return }
+    const scale = img.clientWidth / img.naturalWidth
+    cv.width = img.clientWidth
+    cv.height = img.clientHeight
+    cv.style.left = img.offsetLeft + 'px'
+    cv.style.top = img.offsetTop + 'px'
+    const ctx = cv.getContext('2d')
+    ctx.clearRect(0, 0, cv.width, cv.height)
+    const d = st.pending
+    if (!d) return
+
+    // Pitch lines projected back into the image (magenta, dashed)
+    if (showOverlay && d.overlay_lines) {
+      ctx.strokeStyle = 'rgba(255, 45, 106, 0.85)'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([6, 4])
+      for (const line of d.overlay_lines) {
+        ctx.beginPath()
+        ctx.moveTo(line[0][0] * scale, line[0][1] * scale)
+        ctx.lineTo(line[1][0] * scale, line[1][1] * scale)
+        ctx.stroke()
+      }
+      ctx.setLineDash([])
+    }
+
+    // Team-colored foot markers at the image-space positions of detected players
+    for (const p of d.players || []) {
+      if (!p.img) continue
+      const t = Math.min(1, Math.max(0, p.img[1] / img.naturalHeight))
+      const rx = Math.max(6, img.clientWidth * (0.008 + 0.014 * t))
+      const x = p.img[0] * scale, y = p.img[1] * scale
+      ctx.globalAlpha = p.coasting ? 0.45 : 1.0
+      const c = p.team === 0 ? ((d.team_colors && d.team_colors[0]) || st.teamColors[0])
+        : p.team === 1 ? ((d.team_colors && d.team_colors[1]) || st.teamColors[1])
+        : '#ffffff'
+      ctx.strokeStyle = c
+      ctx.lineWidth = Math.max(2, rx * 0.16)
+      ctx.beginPath()
+      ctx.ellipse(x, y, rx, rx * 0.38, 0, 0, 2 * Math.PI)
+      ctx.stroke()
+    }
+    ctx.globalAlpha = 1.0
+
+    // Ball marker (orange ring on the image)
+    if (d.ball && d.ball.img) {
+      const t = Math.min(1, Math.max(0, d.ball.img[1] / img.naturalHeight))
+      const r = Math.max(5, img.clientWidth * (0.005 + 0.007 * t))
+      ctx.globalAlpha = d.ball.coasting ? 0.45 : 1.0
+      ctx.strokeStyle = '#ffb020'
+      ctx.lineWidth = 2.5
+      ctx.beginPath()
+      ctx.arc(d.ball.img[0] * scale, d.ball.img[1] * scale, r, 0, 2 * Math.PI)
+      ctx.stroke()
+      ctx.globalAlpha = 1.0
+    }
+  }
+
   function renderPitch() {
     const c = pitchRef.current
     if (!c) return
@@ -534,33 +599,50 @@ function PipelineScreen() {
     const { X, Y } = drawPitch(ctx, PITCH_W, PITCH_H)
     const d = st.pending
     if (!d) return
-    let players = (d.players || []).filter((p) => p.pitch && inField(p.pitch))
+    const detectedPlayers = (d.players || []).filter((p) => p.pitch && inField(p.pitch))
     const t1Color = (d.team_colors && d.team_colors[0]) || st.teamColors[0]
     const t2Color = (d.team_colors && d.team_colors[1]) || st.teamColors[1]
     st.teamColors = [t1Color, t2Color]
 
-    // Detect a degenerate projection: if all detected players are clustered
-    // in a small area of the pitch but their image x or y spanned a wide
-    // range, the homography is bad even if the model claimed calib=model.
+    // Detect a degenerate projection: detected players clustered in a small
+    // pitch area but their image-space positions spanned a wide range. When
+    // this happens we keep rendering the detection but desaturate it so the
+    // GT baseline (always-on) reads as the truth.
     let degenerate = false
-    if (players.length >= 4) {
-      const xs = players.map((p) => p.pitch[0])
-      const ys = players.map((p) => p.pitch[1])
-      const xSpread = Math.max(...xs) - Math.min(...xs)
-      const ySpread = Math.max(...ys) - Math.min(...ys)
-      // 6+ players in a 15m x 20m box = degenerate
-      if (players.length >= 6 && xSpread < 15 && ySpread < 20) degenerate = true
+    if (detectedPlayers.length >= 4) {
+      const xs = detectedPlayers.map((p) => p.pitch[0])
+      const ys = detectedPlayers.map((p) => p.pitch[1])
+      if (Math.max(...xs) - Math.min(...xs) < 15 && Math.max(...ys) - Math.min(...ys) < 20) {
+        degenerate = true
+      }
     }
 
-    const usingGT = players.length === 0 || degenerate
-    const gtPlayers = (d.gt && d.gt.players_pitch) || []
-    if (usingGT && gtPlayers.length > 0) {
-      const half = Math.ceil(gtPlayers.length / 2)
-      players = gtPlayers.map((p, i) => ({
-        id: i + 1, team: i < half ? 0 : 1, pitch: p, conf: 1, coasting: false, isGT: true,
-      }))
+    // GT baseline (always on, matches the local test bench behavior).
+    // Renders the actual SoccerNet ground-truth positions as small white
+    // hollow rings so the user has a truthful reference even when the
+    // model projection is degenerate. Suppressed when the user toggles it off.
+    if (showGT) {
+      const gt = (d.gt && d.gt.players_pitch) || []
+      ctx.lineWidth = 1.5
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)'
+      for (const p of gt) {
+        if (!inField(p)) continue
+        const x = X(p[0]), y = Y(p[1])
+        ctx.beginPath()
+        ctx.arc(x, y, 5, 0, 2 * Math.PI)
+        ctx.stroke()
+      }
+      // GT ball as orange hollow ring
+      const gtBall = (d.gt && d.gt.ball_pitch && d.gt.ball_pitch[0]) || null
+      if (gtBall && inField(gtBall)) {
+        ctx.strokeStyle = 'rgba(255,176,32,0.7)'
+        ctx.beginPath()
+        ctx.arc(X(gtBall[0]), Y(gtBall[1]), 4, 0, 2 * Math.PI)
+        ctx.stroke()
+      }
     }
 
+    // Heatmap + ball trail overlays (only when in heat/ball mode)
     if (st.overlayMode === 'heat' || st.overlayMode === 'ball') {
       const recent = st.history.slice(-90)
       ctx.save()
@@ -591,43 +673,54 @@ function PipelineScreen() {
       ctx.restore()
     }
 
-    const t1Pts = players.filter((p) => p.team === 0).map((p) => [X(p.pitch[0]), Y(p.pitch[1])])
-    const t2Pts = players.filter((p) => p.team === 1).map((p) => [X(p.pitch[0]), Y(p.pitch[1])])
-    if (t1Pts.length >= 3) {
-      const h1 = hull(t1Pts)
-      ctx.beginPath(); ctx.moveTo(h1[0][0], h1[0][1])
-      for (let i = 1; i < h1.length; i++) ctx.lineTo(h1[i][0], h1[i][1])
-      ctx.closePath(); ctx.fillStyle = hexA(t1Color, 0.18); ctx.fill()
-    }
-    if (t2Pts.length >= 3) {
-      const h2 = hull(t2Pts)
-      ctx.beginPath(); ctx.moveTo(h2[0][0], h2[0][1])
-      for (let i = 1; i < h2.length; i++) ctx.lineTo(h2[i][0], h2[i][1])
-      ctx.closePath(); ctx.fillStyle = hexA(t2Color, 0.18); ctx.fill()
+    // Team control zones from detected players (only render when not degenerate;
+    // hulls of clustered detections make a misleading tiny blob)
+    if (!degenerate) {
+      const t1Pts = detectedPlayers.filter((p) => p.team === 0).map((p) => [X(p.pitch[0]), Y(p.pitch[1])])
+      const t2Pts = detectedPlayers.filter((p) => p.team === 1).map((p) => [X(p.pitch[0]), Y(p.pitch[1])])
+      if (t1Pts.length >= 3) {
+        const h1 = hull(t1Pts)
+        ctx.beginPath(); ctx.moveTo(h1[0][0], h1[0][1])
+        for (let i = 1; i < h1.length; i++) ctx.lineTo(h1[i][0], h1[i][1])
+        ctx.closePath(); ctx.fillStyle = hexA(t1Color, 0.18); ctx.fill()
+      }
+      if (t2Pts.length >= 3) {
+        const h2 = hull(t2Pts)
+        ctx.beginPath(); ctx.moveTo(h2[0][0], h2[0][1])
+        for (let i = 1; i < h2.length; i++) ctx.lineTo(h2[i][0], h2[i][1])
+        ctx.closePath(); ctx.fillStyle = hexA(t2Color, 0.18); ctx.fill()
+      }
     }
 
-    for (const p of players) {
-      const c = p.team === 0 ? t1Color : t2Color
+    // Detected players: filled team-colored circles (or desaturated if degenerate)
+    for (const p of detectedPlayers) {
+      const c = p.team === 0 ? t1Color : (p.team === 1 ? t2Color : '#9aa6b8')
       const r = p.coasting ? 7 : 9
-      ctx.globalAlpha = p.isGT ? 0.55 : p.coasting ? 0.55 : 1
-      if (p.isGT) {
-        ctx.beginPath()
-        ctx.arc(X(p.pitch[0]), Y(p.pitch[1]), 8, 0, 2 * Math.PI)
-        ctx.strokeStyle = c; ctx.lineWidth = 1.5; ctx.stroke()
-      } else {
+      ctx.globalAlpha = degenerate ? 0.35 : p.coasting ? 0.55 : 1
+      if (showIds) {
         drawPlayer(ctx, X(p.pitch[0]), Y(p.pitch[1]), p.id != null ? p.id : '?', c, r)
+      } else {
+        ctx.beginPath()
+        ctx.arc(X(p.pitch[0]) + 1, Y(p.pitch[1]) + 1, r, 0, 2 * Math.PI)
+        ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill()
+        ctx.beginPath()
+        ctx.arc(X(p.pitch[0]), Y(p.pitch[1]), r, 0, 2 * Math.PI)
+        ctx.fillStyle = c; ctx.fill()
+        ctx.lineWidth = 1.5
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke()
       }
     }
     ctx.globalAlpha = 1
+
+    // Ball: prefer the model detection; if absent, use the GT ball ring
     let ballPitch = d.ball && d.ball.pitch && inField(d.ball.pitch) ? d.ball.pitch : null
-    if (!ballPitch && d.gt && d.gt.ball_pitch && d.gt.ball_pitch[0] && inField(d.gt.ball_pitch[0])) {
-      ballPitch = d.gt.ball_pitch[0]
-    }
     if (ballPitch) {
+      ctx.globalAlpha = degenerate ? 0.4 : 1
       drawBall(ctx, X(ballPitch[0]), Y(ballPitch[1]))
-    } else {
-      // Ball not detected this frame: render a hollow question mark so the
-      // user knows the model is searching, not that the ball is invisible.
+      ctx.globalAlpha = 1
+    } else if (!showGT) {
+      // Only show the missing-ball marker when GT is also off (otherwise the
+      // orange GT ring already shows the ball location)
       const cx = X(52.5), cy = Y(34)
       ctx.beginPath()
       ctx.arc(cx, cy, 8, 0, 2 * Math.PI)
@@ -642,9 +735,16 @@ function PipelineScreen() {
       ctx.textBaseline = 'middle'
       ctx.fillText('?', cx, cy)
     }
-    // frame index badge in the corner of the pitch so the user can correlate
-    // pitch state with the video time slider
-    if (d.idx) {
+    if (degenerate) {
+      // Frame index badge so the user can correlate pitch with slider
+      ctx.fillStyle = 'rgba(255, 45, 106, 0.85)'
+      ctx.fillRect(8, 8, 110, 18)
+      ctx.fillStyle = '#fff'
+      ctx.font = '600 10px Consolas, monospace'
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(`F${String(d.idx).padStart(3, '0')} DEGENERATE`, 14, 17)
+    } else if (d.idx) {
       ctx.fillStyle = 'rgba(6, 10, 20, 0.7)'
       ctx.fillRect(8, 8, 64, 18)
       ctx.fillStyle = '#00ff88'
@@ -834,7 +934,7 @@ function PipelineScreen() {
             </div>
             <div className="video-frame">
               <div className="video-shell">
-                <img ref={frameRef} alt="Match footage" onLoad={() => {/* ok */}} />
+                <img ref={frameRef} alt="Match footage" onLoad={() => drawVideoOverlay()} />
                 <canvas ref={overlayRef} />
                 {!videoReady && (
                   <div className="video-placeholder">
@@ -918,8 +1018,18 @@ function PipelineScreen() {
                   ))}
                 </div>
                 <div className="pt-group" style={{ marginLeft: 'auto' }}>
-                  <label><input type="checkbox" defaultChecked onChange={() => renderPitch()} /> IDs</label>
-                  <label><input type="checkbox" onChange={() => renderPitch()} /> Ball</label>
+                  <label title="Show the SoccerNet ground-truth player positions as a baseline reference">
+                    <input type="checkbox" checked={showGT} onChange={(e) => { setShowGT(e.target.checked); renderPitch() }} />
+                    GT Baseline
+                  </label>
+                  <label title="Draw the projected pitch lines on the video to visualize the homography">
+                    <input type="checkbox" checked={showOverlay} onChange={(e) => { setShowOverlay(e.target.checked); drawVideoOverlay() }} />
+                    Pitch lines
+                  </label>
+                  <label title="Show player ID numbers on the pitch">
+                    <input type="checkbox" checked={showIds} onChange={(e) => { setShowIds(e.target.checked); renderPitch() }} />
+                    IDs
+                  </label>
                 </div>
                 <button
                   className="vbtn"
